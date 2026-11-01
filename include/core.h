@@ -7,6 +7,7 @@
 #include <linux/sched/mm.h>
 #include <linux/spinlock.h>
 #include <linux/version.h>
+#include <linux/workqueue.h>
 #include <linux/xarray.h>
 
 enum sa_thread_state {
@@ -27,8 +28,13 @@ struct sa_allocator_desc {
 	struct xarray threads;
 	struct sa_thread_desc main;
 	struct mmu_notifier notifier;
+
+	struct delayed_work register_work;
+	bool broken;
+
 	long fork_err;
 	bool ready;
+
 	atomic_long_t shadow_installed;
 	atomic_long_t shadow_freed;
 };

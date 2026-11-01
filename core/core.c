@@ -120,6 +120,8 @@ struct sa_batch {
 
 static DECLARE_WAIT_QUEUE_HEAD(sa_fork_wq);
 
+static struct workqueue_struct *sa_wq;
+
 struct sa_gather {
 	struct mm_struct *mm;
 	struct sa_batch *tables;
@@ -283,6 +285,9 @@ static vm_fault_t sa_stack_fault(struct vm_fault *vmf)
 	int ret = 0;
 
 	if (alloc) {
+		if (READ_ONCE(alloc->broken))
+			return VM_FAULT_SIGSEGV;
+
 		ret = sa_install_shadow_page(alloc, addr + shdwstck_delta,
 					     NULL);
 		if (ret < 0)
@@ -298,9 +303,135 @@ static vm_fault_t sa_stack_fault(struct vm_fault *vmf)
 	return 0;
 }
 
-static const struct vm_operations_struct sa_stack_vm_ops = {
-	.fault = sa_stack_fault,
-};
+static struct page *sa_lookup_shadow_page(struct mm_struct *mm,
+					  unsigned long shadow)
+{
+	struct page *page = NULL;
+	spinlock_t *ptl;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+
+	pgd = pgd_offset(mm, shadow);
+	if (pgd_none(*pgd) || pgd_bad(*pgd))
+		return NULL;
+
+	p4d = p4d_offset(pgd, shadow);
+	if (p4d_none(*p4d) || p4d_bad(*p4d))
+		return NULL;
+
+	pud = pud_offset(p4d, shadow);
+	if (pud_none(*pud) || pud_bad(*pud))
+		return NULL;
+
+	pmd = pmd_offset(pud, shadow);
+	if (pmd_none(*pmd) || pmd_bad(*pmd))
+		return NULL;
+
+	pte = my_pte_offset_map_lock(mm, pmd, shadow, &ptl);
+	if (!pte)
+		return NULL;
+
+	if (pte_present(ptep_get(pte))) {
+		page = pte_page(ptep_get(pte));
+		get_page(page);
+	}
+
+	pte_unmap_unlock(pte, ptl);
+	return page;
+}
+
+static long sa_copy_shadow_locked(struct mm_struct *parent_mm,
+				  struct sa_allocator_desc *alloc,
+				  u64 stack_base, u64 sp)
+{
+	u64 shadow = shdwstck_addr(stack_base);
+	unsigned long nr = shdwstck_size >> PAGE_SHIFT;
+	unsigned long first = (sp - stack_base) >> PAGE_SHIFT;
+	int i, copied = 0;
+	long err = 0;
+
+	mmap_assert_locked(parent_mm);
+	mmap_assert_locked(alloc->mm);
+	for (i = 0; i < nr && err >= 0; ++i) {
+		struct page *old, *new;
+
+		old = sa_lookup_shadow_page(parent_mm, shadow + i * PAGE_SIZE);
+		if (!old)
+			continue;
+
+		new = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		if (new) {
+			if (i >= first)
+				copy_highpage(new, old);
+
+			err = sa_install_shadow_page(
+				alloc, shadow + i * PAGE_SIZE, new);
+			if (err > 0)
+				copied += err;
+		} else {
+			err = -ENOMEM;
+		}
+		put_page(old);
+	}
+
+	sa_debug(SA_DEBUG_FORK, "fork: %d shadow pages copied\n", copied);
+	return err < 0 ? err : 0;
+}
+
+static void alloc_free_new(struct sa_allocator_desc *alloc)
+{
+	alloc_unlink(alloc);
+	module_put(THIS_MODULE);
+	kfree(alloc);
+}
+
+static struct sa_allocator_desc *alloc_new(struct mm_struct *mm)
+{
+	struct sa_allocator_desc *alloc;
+	long err;
+
+	alloc = kzalloc_obj(*alloc, GFP_KERNEL);
+	if (!alloc)
+		return ERR_PTR(-ENOMEM);
+
+	alloc->notifier.ops = &sa_mn_ops;
+	alloc->mm = mm;
+	xa_init(&alloc->threads);
+	if (!try_module_get(THIS_MODULE)) {
+		err = -ENODEV;
+		goto err_free;
+	}
+
+	err = alloc_link(alloc);
+	if (err) {
+		if (err == -EEXIST)
+			sa_user_error("mm %p already has an allocator\n", mm);
+		goto err_module;
+	}
+
+	sa_debug(SA_DEBUG_ALLOCATOR, "allocator %p created for mm %p\n", alloc,
+		 mm);
+	return alloc;
+
+err_module:
+	module_put(THIS_MODULE);
+err_free:
+	kfree(alloc);
+	return ERR_PTR(err);
+}
+
+static int alloc_register(struct sa_allocator_desc *alloc)
+{
+	int err = mmu_notifier_register(&alloc->notifier, alloc->mm);
+
+	if (err)
+		sa_debug(SA_DEBUG_FAILED, "mmu_notifier_register failed: %d\n",
+			 err);
+	return err;
+}
 
 static void unmap_pte_range(struct sa_gather *g, pmd_t *pmd, unsigned long addr,
 			    unsigned long end)
@@ -320,6 +451,77 @@ static void unmap_pte_range(struct sa_gather *g, pmd_t *pmd, unsigned long addr,
 		}
 
 	} while (pte++, addr += PAGE_SIZE, addr != end);
+}
+
+static void unmap_pmd_range(struct sa_gather *g, pud_t *pud, unsigned long addr,
+			    unsigned long end)
+{
+	pmd_t *pmd = pmd_offset(pud, addr);
+	unsigned long next;
+
+	do {
+		next = pmd_addr_end(addr, end);
+		if (pmd_none(*pmd) || pmd_bad(*pmd))
+			continue;
+
+		unmap_pte_range(g, pmd, addr, next);
+	} while (pmd++, addr = next, addr != end);
+}
+
+static void unmap_pud_range(struct sa_gather *g, p4d_t *p4d, unsigned long addr,
+			    unsigned long end)
+{
+	pud_t *pud = pud_offset(p4d, addr);
+	unsigned long next;
+
+	do {
+		next = pud_addr_end(addr, end);
+		if (pud_none(*pud) || pud_bad(*pud))
+			continue;
+
+		unmap_pmd_range(g, pud, addr, next);
+	} while (pud++, addr = next, addr != end);
+}
+
+static void unmap_p4d_range(struct sa_gather *g, pgd_t *pgd, unsigned long addr,
+			    unsigned long end)
+{
+	p4d_t *p4d = p4d_offset(pgd, addr);
+	unsigned long next;
+
+	do {
+		next = p4d_addr_end(addr, end);
+		if (p4d_none(*p4d) || p4d_bad(*p4d))
+			continue;
+
+		unmap_pud_range(g, p4d, addr, next);
+	} while (p4d++, addr = next, addr != end);
+}
+
+/**
+ * unmap_range - Clears all the PTEs in [addr, end) (and invalidates the TLB).
+ * It doesn't free the intermediate tables because they might be used by other slots.
+ * @mm: mm_struct of the current process.
+ * @addr: starting address of the range to unmap.
+ * @end: ending address of the range to unmap.
+ *
+ * Context: Process context, assumes mmap_write_lock() is held.
+ */
+static inline void unmap_range(struct sa_gather *g, u64 addr, u64 end)
+{
+	unsigned long next;
+	pgd_t *pgd;
+
+	mmap_assert_locked(g->mm);
+	sa_debug(SA_DEBUG_PGTABLE, "unmapping [%llx-%llx)\n", addr, end);
+	pgd = pgd_offset(g->mm, addr);
+	do {
+		next = pgd_addr_end(addr, end);
+		if (pgd_none(*pgd) || pgd_bad(*pgd))
+			continue;
+
+		unmap_p4d_range(g, pgd, addr, next);
+	} while (pgd++, addr = next, addr != end);
 }
 
 static void free_pte_range(struct sa_gather *g, pmd_t *pmd, unsigned long addr,
@@ -437,6 +639,100 @@ static void my_free_pgd_range(struct sa_gather *g, unsigned long addr,
 	} while (pgd++, addr = next, addr != end);
 }
 
+static long sa_unmap_slot_locked(struct sa_allocator_desc *alloc,
+				 u64 stack_base)
+{
+	struct sa_gather g = { .mm = alloc->mm };
+	u64 shadow = shdwstck_addr(stack_base);
+
+	unmap_range(&g, shadow, shadow + shdwstck_size);
+	sa_gather_finish(&g);
+	atomic_long_add(g.nr_freed, &alloc->shadow_freed);
+	sa_debug(SA_DEBUG_PAGES, "slot %llx: freed %lu shadow pages\n",
+		 stack_base, g.nr_freed);
+	return g.nr_freed;
+}
+
+static unsigned long sa_free_shadow_area(struct mm_struct *mm)
+{
+	struct sa_gather g = { .mm = mm };
+
+	mmap_write_lock(mm);
+	my_free_pgd_range(&g, shdwstck_start, shdwstck_end);
+	sa_gather_finish(&g);
+	mmap_write_unlock(mm);
+	sa_debug(SA_DEBUG_PAGES, "freed %lu shadow pages\n", g.nr_freed);
+	return g.nr_freed;
+}
+
+static void sa_register_work(struct work_struct *w)
+{
+	struct sa_allocator_desc *alloc = container_of(
+		to_delayed_work(w), struct sa_allocator_desc, register_work);
+	struct mm_struct *mm = alloc->mm;
+
+	if (mmget_not_zero(mm)) {
+		if (alloc_register(alloc)) {
+			mmput(mm);
+			queue_delayed_work(sa_wq, &alloc->register_work,
+					   HZ / 10);
+			return;
+		}
+
+		mmput(mm);
+		mmdrop(mm);
+		return;
+	}
+
+	sa_free_shadow_area(mm);
+	alloc_free_new(alloc);
+	mmdrop(mm);
+}
+
+static void sa_stack_open(struct vm_area_struct *vma)
+{
+	struct mm_struct *child = vma->vm_mm;
+	unsigned long sp = current_pt_regs()->sp;
+	struct sa_allocator_desc *alloc;
+	long err;
+
+	if (child == current->mm)
+		return;
+
+	if (sp < vma->vm_start || sp >= vma->vm_end)
+		return;
+
+	if (!alloc_find(current->mm))
+		return;
+
+	alloc = alloc_new(vma->vm_mm);
+	if (IS_ERR(alloc)) {
+		sa_debug(SA_DEBUG_FAILED | SA_DEBUG_FORK,
+			 "fork: no allocator for child (%ld)\n",
+			 PTR_ERR(alloc));
+		return;
+	}
+
+	err = sa_copy_shadow_locked(current->mm, alloc, vma->vm_start, sp);
+	if (err) {
+		sa_unmap_slot_locked(alloc, vma->vm_start);
+		WRITE_ONCE(alloc->broken, true);
+		sa_debug(SA_DEBUG_FAILED | SA_DEBUG_FORK,
+			 "fork: copy failed (%ld)\n", err);
+	}
+
+	alloc->main.stack_base = vma->vm_start;
+	alloc->main.state = SA_OWNED;
+	mmgrab(child);
+	INIT_DELAYED_WORK(&alloc->register_work, sa_register_work);
+	queue_delayed_work(sa_wq, &alloc->register_work, 0);
+}
+
+static const struct vm_operations_struct sa_stack_vm_ops = {
+	.fault = sa_stack_fault,
+	.open = sa_stack_open,
+};
+
 long sa_init(void)
 {
 	if (!shdwstck_start || !shdwstck_user_start || !shdwstck_size ||
@@ -469,6 +765,13 @@ long sa_init(void)
 		return -ENOMEM;
 	}
 
+	sa_wq = alloc_workqueue("shdwstck", 0, 0);
+	if (!sa_wq) {
+		__free_page(sa_zero_page);
+		sa_zero_page = NULL;
+		return -ENOMEM;
+	}
+
 	return 0;
 }
 
@@ -476,127 +779,26 @@ void sa_exit(void)
 {
 	if (sa_zero_page)
 		__free_page(sa_zero_page);
+
+	if (sa_wq)
+		destroy_workqueue(sa_wq);
 }
 
 struct sa_allocator_desc *alloc_create(struct mm_struct *mm)
 {
-	struct sa_allocator_desc *alloc;
-	long err;
+	int err;
+	struct sa_allocator_desc *alloc = alloc_new(mm);
 
-	alloc = kzalloc_obj(*alloc, GFP_KERNEL);
-	if (!alloc) {
-		sa_debug(SA_DEBUG_FAILED, "out of memory\n");
-		return ERR_PTR(-ENOMEM);
-	}
+	if (IS_ERR(alloc))
+		return alloc;
 
-	alloc->notifier.ops = &sa_mn_ops;
-	alloc->mm = mm;
-	xa_init(&alloc->threads);
-	err = alloc_link(alloc);
+	err = alloc_register(alloc);
 	if (err) {
-		if (err == -EEXIST)
-			sa_user_error("mm %p already has an allocator\n", mm);
-		else
-			sa_debug(SA_DEBUG_FAILED, "alloc_link failed: %ld\n",
-				 err);
-		goto err_free;
+		alloc_free_new(alloc);
+		return ERR_PTR(err);
 	}
 
-	if (!try_module_get(THIS_MODULE)) {
-		sa_debug(SA_DEBUG_FAILED, "module is going away\n");
-		err = -ENODEV;
-		goto err_erase;
-	}
-
-	err = mmu_notifier_register(&alloc->notifier, mm);
-	if (err) {
-		sa_debug(SA_DEBUG_FAILED, "mmu_notifier_register failed: %ld\n",
-			 err);
-		goto err_module;
-	}
-
-	sa_debug(SA_DEBUG_ALLOCATOR, "allocator %p created for mm %p\n", alloc,
-		 mm);
 	return alloc;
-
-err_module:
-	module_put(THIS_MODULE);
-err_erase:
-	alloc_unlink(alloc);
-err_free:
-	kfree(alloc);
-	return ERR_PTR(err);
-}
-
-static void unmap_pmd_range(struct sa_gather *g, pud_t *pud, unsigned long addr,
-			    unsigned long end)
-{
-	pmd_t *pmd = pmd_offset(pud, addr);
-	unsigned long next;
-
-	do {
-		next = pmd_addr_end(addr, end);
-		if (pmd_none(*pmd) || pmd_bad(*pmd))
-			continue;
-
-		unmap_pte_range(g, pmd, addr, next);
-	} while (pmd++, addr = next, addr != end);
-}
-
-static void unmap_pud_range(struct sa_gather *g, p4d_t *p4d, unsigned long addr,
-			    unsigned long end)
-{
-	pud_t *pud = pud_offset(p4d, addr);
-	unsigned long next;
-
-	do {
-		next = pud_addr_end(addr, end);
-		if (pud_none(*pud) || pud_bad(*pud))
-			continue;
-
-		unmap_pmd_range(g, pud, addr, next);
-	} while (pud++, addr = next, addr != end);
-}
-
-static void unmap_p4d_range(struct sa_gather *g, pgd_t *pgd, unsigned long addr,
-			    unsigned long end)
-{
-	p4d_t *p4d = p4d_offset(pgd, addr);
-	unsigned long next;
-
-	do {
-		next = p4d_addr_end(addr, end);
-		if (p4d_none(*p4d) || p4d_bad(*p4d))
-			continue;
-
-		unmap_pud_range(g, p4d, addr, next);
-	} while (p4d++, addr = next, addr != end);
-}
-
-/**
- * unmap_range - Clears all the PTEs in [addr, end) (and invalidates the TLB).
- * It doesn't free the intermediate tables because they might be used by other slots.
- * @mm: mm_struct of the current process.
- * @addr: starting address of the range to unmap.
- * @end: ending address of the range to unmap.
- *
- * Context: Process context, assumes mmap_write_lock() is held.
- */
-static inline void unmap_range(struct sa_gather *g, u64 addr, u64 end)
-{
-	unsigned long next;
-	pgd_t *pgd;
-
-	mmap_assert_write_locked(g->mm);
-	sa_debug(SA_DEBUG_PGTABLE, "unmapping [%llx-%llx)\n", addr, end);
-	pgd = pgd_offset(g->mm, addr);
-	do {
-		next = pgd_addr_end(addr, end);
-		if (pgd_none(*pgd) || pgd_bad(*pgd))
-			continue;
-
-		unmap_p4d_range(g, pgd, addr, next);
-	} while (pgd++, addr = next, addr != end);
 }
 
 static bool valid_stack_base(unsigned long base)
@@ -729,46 +931,6 @@ long sa_detach(u64 stack_base)
 	return err;
 }
 
-static struct page *sa_lookup_shadow_page(struct mm_struct *mm,
-					  unsigned long shadow)
-{
-	struct page *page = NULL;
-	spinlock_t *ptl;
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pud_t *pud;
-	pmd_t *pmd;
-	pte_t *pte;
-
-	pgd = pgd_offset(mm, shadow);
-	if (pgd_none(*pgd) || pgd_bad(*pgd))
-		return NULL;
-
-	p4d = p4d_offset(pgd, shadow);
-	if (p4d_none(*p4d) || p4d_bad(*p4d))
-		return NULL;
-
-	pud = pud_offset(p4d, shadow);
-	if (pud_none(*pud) || pud_bad(*pud))
-		return NULL;
-
-	pmd = pmd_offset(pud, shadow);
-	if (pmd_none(*pmd) || pmd_bad(*pmd))
-		return NULL;
-
-	pte = my_pte_offset_map_lock(mm, pmd, shadow, &ptl);
-	if (!pte)
-		return NULL;
-
-	if (pte_present(ptep_get(pte))) {
-		page = pte_page(ptep_get(pte));
-		get_page(page);
-	}
-
-	pte_unmap_unlock(pte, ptl);
-	return page;
-}
-
 /**
  * sa_area_p4d - Returns the top-level entry covering @addr in the shadow area.
  * With 4-level paging p4d_offset() returns the pgd entry itself, so this works
@@ -799,18 +961,6 @@ static bool sa_area_empty(struct mm_struct *mm)
 		}
 	}
 	return true;
-}
-
-static unsigned long sa_free_shadow_area(struct mm_struct *mm)
-{
-	struct sa_gather g = { .mm = mm };
-
-	mmap_write_lock(mm);
-	my_free_pgd_range(&g, shdwstck_start, shdwstck_end);
-	sa_gather_finish(&g);
-	mmap_write_unlock(mm);
-	sa_debug(SA_DEBUG_PAGES, "freed %lu shadow pages\n", g.nr_freed);
-	return g.nr_freed;
 }
 
 static inline bool sa_fork_ready(struct mm_struct *mm,
