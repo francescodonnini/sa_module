@@ -17,6 +17,7 @@
 #include <linux/sched/task_stack.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/sysfs.h>
 #include <linux/types.h>
 #include <linux/version.h>
 #include <linux/vmalloc.h>
@@ -106,6 +107,19 @@ module_param(shdwstck_start, ulong, SHDWSTCK_PARAM_PERM);
 unsigned long shdwstck_user_end __ro_after_init;
 unsigned long shdwstck_end __ro_after_init;
 unsigned long shdwstck_delta __ro_after_init;
+
+static atomic_long_t sa_live_pages = ATOMIC_LONG_INIT(0);
+
+static int sa_live_pages_get(char *buf, const struct kernel_param *kp)
+{
+	return sysfs_emit(buf, "%ld\n", atomic_long_read(&sa_live_pages));
+}
+
+static const struct kernel_param_ops sa_live_pages_ops = {
+	.get = sa_live_pages_get,
+};
+
+module_param_cb(live_shadow_pages, &sa_live_pages_ops, NULL, 0444);
 
 #define shdwstck_addr(stack_base) (stack_base + shdwstck_delta)
 #define shdwstck_idx(b) (((b) - shdwstck_user_start) / shdwstck_size)
@@ -265,8 +279,10 @@ static int sa_install_shadow_page(struct sa_allocator_desc *alloc,
 	if (page)
 		__free_page(page);
 
-	if (ret)
+	if (ret) {
 		atomic_long_inc(&alloc->shadow_installed);
+		atomic_long_inc(&sa_live_pages);
+	}
 
 	return ret;
 
@@ -448,6 +464,7 @@ static void unmap_pte_range(struct sa_gather *g, pmd_t *pmd, unsigned long addr,
 		if (pte_present(old)) {
 			sa_gather_page(g, pte_page(old));
 			g->nr_freed++;
+			atomic_long_dec(&sa_live_pages);
 		}
 
 	} while (pte++, addr += PAGE_SIZE, addr != end);
@@ -765,7 +782,7 @@ long sa_init(void)
 		return -ENOMEM;
 	}
 
-	sa_wq = alloc_workqueue("shdwstck", 0, 0);
+	sa_wq = alloc_workqueue("shdwstck", WQ_UNBOUND, 0);
 	if (!sa_wq) {
 		__free_page(sa_zero_page);
 		sa_zero_page = NULL;
