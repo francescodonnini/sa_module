@@ -8,8 +8,8 @@
 
 enum {
 	IOCTL_SHADOW_ALLOC_NO = 0x70,
-	IOCTL_SHADOW_FORK_CHILD_NO,
-	IOCTL_SHADOW_FORK_PARENT_NO,
+	IOCTL_SHADOW_UNUSED_01_NO,
+	IOCTL_SHADOW_UNUSED_02_NO,
 	IOCTL_SHADOW_DETACH_NO,
 	IOCTL_SHADOW_PIVOT_NO,
 	IOCTL_SHADOW_PREPARE_NO,
@@ -57,8 +57,11 @@ struct ioctl_stack_params {
 #define IOCTL_SHADOW_DETACH                               \
 	_IOWR(IOCTL_SHADOW_MAGIC, IOCTL_SHADOW_DETACH_NO, \
 	      struct ioctl_stack_params)
-#define IOCTL_SHADOW_FORK_CHILD                               \
-	_IOWR(IOCTL_SHADOW_MAGIC, IOCTL_SHADOW_FORK_CHILD_NO, \
+#define IOCTL_SHADOW_UNUSED_01                               \
+	_IOWR(IOCTL_SHADOW_MAGIC, IOCTL_SHADOW_UNUSED_01_NO, \
+	      struct ioctl_stack_params)
+#define IOCTL_SHADOW_UNUSED_02                               \
+	_IOWR(IOCTL_SHADOW_MAGIC, IOCTL_SHADOW_UNUSED_02_NO, \
 	      struct ioctl_stack_params)
 #define IOCTL_SHADOW_FORK_PARENT                               \
 	_IOWR(IOCTL_SHADOW_MAGIC, IOCTL_SHADOW_FORK_PARENT_NO, \
