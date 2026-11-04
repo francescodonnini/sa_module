@@ -10,6 +10,7 @@
 #include "shadow_pt.h"
 #include <linux/err.h>
 #include <linux/gfp.h>
+#include <linux/highmem.h>
 #include <linux/mm.h>
 #include <linux/mmap_lock.h>
 #include <linux/ptrace.h>
@@ -23,6 +24,33 @@
  * the shadow page of the faulting address.
  */
 static struct page *sa_zero_page;
+
+static int sa_stack_access(struct vm_area_struct *vma, unsigned long addr,
+			   void *buf, int len, int write)
+{
+	unsigned flags;
+	int off;
+	struct page *page;
+	void *kaddr;
+
+	flags = FOLL_FORCE | (write ? FOLL_WRITE : 0);
+	off = offset_in_page(addr);
+	len = min_t(int, len, PAGE_SIZE - off);
+	if (get_user_pages_remote(vma->vm_mm, addr, 1, flags, &page, NULL) != 1)
+		return -EFAULT;
+
+	kaddr = kmap_local_page(page);
+	if (write) {
+		memcpy(kaddr + off, buf, len);
+		set_page_dirty_lock(page);
+	} else {
+		memcpy(buf, kaddr + off, len);
+	}
+
+	kunmap_local(kaddr);
+	put_page(page);
+	return len;
+}
 
 static vm_fault_t sa_stack_fault(struct vm_fault *vmf)
 {
@@ -114,6 +142,7 @@ static void sa_stack_close(struct vm_area_struct *vma)
 }
 
 static const struct vm_operations_struct sa_stack_vm_ops = {
+	.access = sa_stack_access,
 	.close = sa_stack_close,
 	.fault = sa_stack_fault,
 	.open = sa_stack_open,
