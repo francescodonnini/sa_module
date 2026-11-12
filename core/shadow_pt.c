@@ -332,11 +332,14 @@ static inline void unmap_range(struct sa_gather *g, u64 addr, u64 end)
 	} while (pgd++, addr = next, addr != end);
 }
 
+void sa_unmap_range(struct sa_gather *g, unsigned long start, unsigned long end)
+{
+	unmap_range(g, shdwstck_addr(start), shdwstck_addr(end));
+}
+
 void sa_unmap_slot(struct sa_gather *g, unsigned long stack_base)
 {
-	unsigned long shadow = shdwstck_addr(stack_base);
-
-	unmap_range(g, shadow, shadow + shdwstck_size);
+	sa_unmap_range(g, stack_base, stack_base + shdwstck_size);
 }
 
 static void free_pte_range(struct sa_gather *g, pmd_t *pmd, unsigned long addr,

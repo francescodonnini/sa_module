@@ -133,12 +133,23 @@ static void sa_stack_close(struct vm_area_struct *vma)
 	struct mm_struct *mm = vma->vm_mm;
 	struct sa_allocator_desc *alloc;
 
-	if (atomic_read(&mm->mm_users))
+	alloc = alloc_find(mm);
+	if (!alloc)
 		return;
 
-	alloc = alloc_find(mm);
-	if (alloc)
-		alloc_teardown_locked(alloc);
+	if (atomic_read(&mm->mm_users)) {
+		struct sa_gather g = { .mm = mm };
+		unsigned long nr;
+
+		sa_unmap_range(&g, vma->vm_start, vma->vm_end);
+		nr = sa_gather_finish(&g);
+		sa_debug(SA_DEBUG_PAGES,
+			 "close [%lx-%lx): %lu shadow pages freed\n",
+			 vma->vm_start, vma->vm_end, nr);
+		return;
+	}
+
+	alloc_teardown_locked(alloc);
 }
 
 static const struct vm_operations_struct sa_stack_vm_ops = {
