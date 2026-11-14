@@ -111,14 +111,12 @@ static void sa_stack_open(struct vm_area_struct *vma)
 	err = sa_copy_shadow_locked(current->mm, child, vma->vm_start, sp);
 	if (err) {
 		/* open cannot fail the fork: the child dies at its first fault */
-		sa_unmap_slot_locked(child, vma->vm_start);
 		WRITE_ONCE(alloc->broken, true);
 		sa_debug(SA_DEBUG_FAILED | SA_DEBUG_FORK,
 			 "fork: copy failed (%ld)\n", err);
 	}
 
-	alloc->main.stack_base = vma->vm_start;
-	alloc->main.state = SA_OWNED;
+	alloc->main_stack = vma->vm_start;
 }
 
 /*

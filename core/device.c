@@ -23,139 +23,21 @@ struct shdwstck_device {
 
 static struct shdwstck_device device;
 
-static long check_ioctl_cmd(unsigned int cmd)
-{
-	if (_IOC_TYPE(cmd) != IOCTL_SHADOW_MAGIC) {
-		pr_err("wrong magic number, expected %d but got %d",
-		       IOCTL_SHADOW_MAGIC, _IOC_TYPE(cmd));
-		return -EINVAL;
-	}
-	if (_IOC_NR(cmd) > IOCTL_SHADOW_MAX_NR) {
-		pr_err("number too high");
-		return -EINVAL;
-	}
-
-	switch (cmd) {
-	case IOCTL_SHADOW_ALLOC:
-	case IOCTL_SHADOW_DETACH:
-	case IOCTL_SHADOW_PIVOT:
-	case IOCTL_SHADOW_PREPARE:
-	case IOCTL_SHADOW_RECLAIM:
-	case IOCTL_SHADOW_RECLAIM_DEAD:
-	case IOCTL_SHADOW_UNPREPARE:
-		break;
-	default:
-		return -ENOTTY;
-	}
-
-	if (!(_IOC_DIR(cmd) & (_IOC_READ | _IOC_WRITE))) {
-		pr_err("ioctl: invalid request direction\n");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
 static long shdwstck_ioctl(struct file *file, unsigned int cmd,
 			   unsigned long arg)
 {
 	void __user *user_arg = (void __user *)arg;
-	long err;
+	struct ioctl_pivot_params req;
 
-	err = check_ioctl_cmd(cmd);
-	if (err)
-		return err;
+	if (cmd != IOCTL_SHADOW_PIVOT)
+		return -ENOTTY;
 
-	switch (cmd) {
-	case IOCTL_SHADOW_ALLOC: {
-		struct ioctl_stack_params req;
+	if (copy_from_user(&req, user_arg, sizeof(req)))
+		return -EFAULT;
 
-		if (copy_from_user(&req, user_arg, sizeof(req)))
-			return -EFAULT;
-
-		req.error = sa_alloc(req.stack_base);
-		if (copy_to_user(user_arg, &req, sizeof(req)))
-			return -EFAULT;
-
-		break;
-	}
-	case IOCTL_SHADOW_DETACH: {
-		struct ioctl_stack_params req;
-
-		if (copy_from_user(&req, user_arg, sizeof(req)))
-			return -EFAULT;
-
-		req.error = sa_detach(req.stack_base);
-		if (copy_to_user(user_arg, &req, sizeof(req)))
-			return -EFAULT;
-
-		break;
-	}
-	case IOCTL_SHADOW_PIVOT: {
-		struct ioctl_pivot_params req;
-
-		if (copy_from_user(&req, user_arg, sizeof(req)))
-			return -EFAULT;
-
-		req.error =
-			sa_pivot(req.rsp, req.new_stack_address, &req.delta);
-		if (copy_to_user(user_arg, &req, sizeof(req)))
-			return -EFAULT;
-
-		break;
-	}
-	case IOCTL_SHADOW_PREPARE: {
-		struct ioctl_prepare_params req;
-
-		if (copy_from_user(&req, user_arg, sizeof(req)))
-			return -EFAULT;
-
-		req.error = sa_prepare(req.stack_base, req.detached);
-		if (copy_to_user(user_arg, &req, sizeof(req)))
-			return -EFAULT;
-
-		break;
-	}
-	case IOCTL_SHADOW_RECLAIM: {
-		struct ioctl_stack_params req;
-
-		if (copy_from_user(&req, user_arg, sizeof(req)))
-			return -EFAULT;
-
-		req.error = sa_reclaim(req.stack_base);
-		if (copy_to_user(user_arg, &req, sizeof(req)))
-			return -EFAULT;
-
-		break;
-	}
-	case IOCTL_SHADOW_RECLAIM_DEAD: {
-		struct ioctl_reclaim_dead_params req;
-		long n;
-
-		if (copy_from_user(&req, user_arg, sizeof(req)))
-			return -EFAULT;
-
-		n = sa_reclaim_dead(u64_to_user_ptr(req.bases), req.cap);
-		req.error = n < 0 ? n : 0;
-		req.count = n < 0 ? 0 : n;
-		if (copy_to_user(user_arg, &req, sizeof(req)))
-			return -EFAULT;
-
-		break;
-	}
-	case IOCTL_SHADOW_UNPREPARE: {
-		struct ioctl_stack_params req;
-
-		if (copy_from_user(&req, user_arg, sizeof(req)))
-			return -EFAULT;
-
-		req.error = sa_unprepare(req.stack_base);
-		if (copy_to_user(user_arg, &req, sizeof(req)))
-			return -EFAULT;
-
-		break;
-	}
-	}
+	req.error = sa_pivot(req.rsp, req.new_stack_address, &req.delta);
+	if (copy_to_user(user_arg, &req, sizeof(req)))
+		return -EFAULT;
 
 	return 0;
 }
@@ -163,7 +45,7 @@ static long shdwstck_ioctl(struct file *file, unsigned int cmd,
 static const struct file_operations ops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = shdwstck_ioctl,
-#ifdef SA_HAVE_MMAP_PREPARE
+#if SA_HAVE_MMAP_PREPARE
 	.mmap_prepare = sa_mmap_prepare,
 #else
 	.mmap = sa_mmap,
@@ -206,7 +88,7 @@ int sa_device_init(void)
 
 	err = alloc_chrdev_region(&device.dev, 0, 1, DEVICE_NAME);
 	if (err) {
-		pr_err("cannot register char-device %s, got error %d",
+		pr_err("cannot register char-device %s, got error %d\n",
 		       DEVICE_NAME, err);
 		return err;
 	}
@@ -215,7 +97,7 @@ int sa_device_init(void)
 	device.cdev.owner = THIS_MODULE;
 	err = cdev_add(&device.cdev, device.dev, 1);
 	if (err) {
-		pr_err("cannot add device %d:%d, got error %d",
+		pr_err("cannot add device %d:%d, got error %d\n",
 		       MAJOR(device.dev), MINOR(device.dev), err);
 		goto out;
 	}
@@ -228,7 +110,7 @@ int sa_device_init(void)
 
 	if (IS_ERR(device_class)) {
 		err = PTR_ERR(device_class);
-		pr_err("cannot create class %s, got error %d", DEVICE_CLASS,
+		pr_err("cannot create class %s, got error %d\n", DEVICE_CLASS,
 		       err);
 		goto out2;
 	}
@@ -239,7 +121,7 @@ int sa_device_init(void)
 				       shdwstck_device_groups, DEVICE_NAME);
 	if (IS_ERR(dp)) {
 		err = PTR_ERR(dp);
-		pr_err("cannot create device /dev/%s, got error %d",
+		pr_err("cannot create device /dev/%s, got error %d\n",
 		       DEVICE_NAME, err);
 		goto out3;
 	}

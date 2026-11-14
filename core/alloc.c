@@ -8,7 +8,6 @@
 #include <linux/err.h>
 #include <linux/mmap_lock.h>
 #include <linux/module.h>
-#include <linux/pid.h>
 #include <linux/slab.h>
 
 static DEFINE_XARRAY(sa_allocators);
@@ -56,7 +55,6 @@ struct sa_allocator_desc *alloc_new(struct mm_struct *mm)
 		return ERR_PTR(-ENOMEM);
 
 	alloc->mm = mm;
-	xa_init(&alloc->threads);
 	if (!try_module_get(THIS_MODULE)) {
 		err = -ENODEV;
 		goto err_free;
@@ -86,20 +84,8 @@ err_free:
  */
 void alloc_destroy(struct sa_allocator_desc *alloc)
 {
-	struct sa_thread_desc *t;
-	unsigned long tid;
-	unsigned int nr = 0;
-
 	alloc_unlink(alloc);
-	put_pid(alloc->main.owner);
-	xa_for_each(&alloc->threads, tid, t) {
-		put_pid(t->owner);
-		kfree(t);
-		nr++;
-	}
-	xa_destroy(&alloc->threads);
-	sa_debug(SA_DEBUG_ALLOCATOR, "allocator %p freed (%u thread slots)\n",
-		 alloc, nr);
+	sa_debug(SA_DEBUG_ALLOCATOR, "allocator %p freed\n", alloc);
 	kfree(alloc);
 	module_put(THIS_MODULE);
 }

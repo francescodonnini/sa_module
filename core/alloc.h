@@ -6,24 +6,9 @@
 #include <linux/types.h>
 #include <linux/xarray.h>
 
-enum sa_thread_state {
-	SA_OWNED,
-	SA_PREPARED,
-};
-
-struct sa_thread_desc {
-	u64 stack_base;
-	enum sa_thread_state state;
-	bool detached;
-	struct pid *owner;
-	struct list_head list;
-};
-
 struct sa_allocator_desc {
 	struct mm_struct *mm;
-	struct xarray threads;
-	struct sa_thread_desc main;
-
+	u64 main_stack;
 	/* the shadow of the child could not be copied: its stack faults SIGSEGV */
 	bool broken;
 };

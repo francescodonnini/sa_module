@@ -14,8 +14,6 @@ struct sa_gather {
 	unsigned long nr_freed;
 };
 
-void sa_unmap_slot(struct sa_gather *g, unsigned long stack_base);
-
 unsigned long sa_gather_finish(struct sa_gather *g);
 
 int sa_install_shadow_page(struct mm_struct *mm, unsigned long shadow,
@@ -28,8 +26,6 @@ long sa_copy_shadow_locked(struct mm_struct *parent_mm, struct mm_struct *mm,
 
 void sa_unmap_range(struct sa_gather *g, unsigned long start,
 		    unsigned long end);
-
-unsigned long sa_unmap_slot_locked(struct mm_struct *mm, u64 stack_base);
 
 unsigned long sa_free_shadow_area_locked(struct mm_struct *mm);
 

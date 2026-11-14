@@ -8,7 +8,6 @@ shdwstck_runtime-objs := main.o \
                          core/pivot.o \
                          core/pt_bindings.o \
                          core/shadow_pt.o \
-                         core/slots.o \
                          core/stack_vma.o \
 						 core/pt_bindings.o
 

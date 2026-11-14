@@ -28,7 +28,6 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta)
 {
 	struct mm_struct *mm;
 	struct sa_allocator_desc *alloc;
-	struct sa_thread_desc *thread;
 	struct vm_area_struct *old_area, *new_area;
 	unsigned long old_start, new_start, sp, addr;
 	size_t old_len;
@@ -43,7 +42,6 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta)
 	if (IS_ERR(alloc))
 		return PTR_ERR(alloc);
 
-	thread = &alloc->main;
 	mmap_write_lock(mm);
 	if (!sa_area_empty(mm)) {
 		/* not our tables: do not free anything */
@@ -98,9 +96,7 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta)
 	old_start = old_area->vm_start;
 	old_len = old_area->vm_end - old_area->vm_start;
 	mmap_write_unlock(mm);
-	thread->stack_base = new_start;
-	thread->owner = get_pid(task_pid(current));
-	thread->state = SA_OWNED;
+	alloc->main_stack = new_start;
 	delta = new_stack_address - rsp;
 	spin_lock(&mm->arg_lock);
 	mm->start_stack = new_start;
@@ -119,7 +115,8 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta)
 	}
 
 	spin_unlock(&mm->arg_lock);
-	vm_munmap(old_start, old_len);
+	// disattivato per ora, lo stack non si può spostare completamente
+	// vm_munmap(old_start, old_len);
 	*sa_delta = shdwstck_delta;
 	sa_debug(SA_DEBUG_PIVOT,
 		 "pivot: [%lx-%lx) -> [%lx-%lx), delta %ld, shadow %llx\n",

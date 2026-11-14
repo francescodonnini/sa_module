@@ -337,11 +337,6 @@ void sa_unmap_range(struct sa_gather *g, unsigned long start, unsigned long end)
 	unmap_range(g, shdwstck_addr(start), shdwstck_addr(end));
 }
 
-void sa_unmap_slot(struct sa_gather *g, unsigned long stack_base)
-{
-	sa_unmap_range(g, stack_base, stack_base + shdwstck_size);
-}
-
 static void free_pte_range(struct sa_gather *g, pmd_t *pmd, unsigned long addr,
 			   unsigned long end)
 {
@@ -455,18 +450,6 @@ static void my_free_pgd_range(struct sa_gather *g, unsigned long addr,
 
 		free_p4d_range(g, pgd, addr, next);
 	} while (pgd++, addr = next, addr != end);
-}
-
-unsigned long sa_unmap_slot_locked(struct mm_struct *mm, u64 stack_base)
-{
-	struct sa_gather g = { .mm = mm };
-	unsigned long nr;
-
-	sa_unmap_slot(&g, stack_base);
-	nr = sa_gather_finish(&g);
-	sa_debug(SA_DEBUG_PAGES, "slot %llx: freed %lu shadow pages\n",
-		 stack_base, nr);
-	return nr;
 }
 
 /**
