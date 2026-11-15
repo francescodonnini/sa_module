@@ -15,19 +15,12 @@ void alloc_index_destroy(void);
 long resolve_symbols(void);
 
 /* ioctl handlers */
-long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta);
+long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta, u64 *out_old_start,
+	      u64 *out_old_len);
 
 long sa_prepare(u64 stack_base, bool detached);
 
-long sa_alloc(u64 stack_base);
-
-long sa_detach(u64 stack_base);
-
-long sa_reclaim(u64 stack_base);
-
-long sa_reclaim_dead(u64 __user *reclaimed, unsigned cap);
-
-long sa_unprepare(u64 stack_base);
+long sa_get_offset(u64 *offset);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 #define SA_HAVE_MMAP_PREPARE 1

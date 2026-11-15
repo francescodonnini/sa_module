@@ -24,7 +24,8 @@
  *
  * Returns 0 on success, <0 otherwise
  */
-long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta)
+long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta, u64 *out_old_start,
+	      u64 *out_old_len)
 {
 	struct mm_struct *mm;
 	struct sa_allocator_desc *alloc;
@@ -74,8 +75,15 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta)
 		goto err_unlock;
 	}
 
-	sp = current_pt_regs()->sp;
+	sp = new_stack_address;
 	if (sp < new_start || sp >= new_start + shdwstck_size) {
+		err = -EINVAL;
+		goto err_unlock;
+	}
+
+	if (mm->start_stack < old_area->vm_start ||
+	    mm->start_stack >= old_area->vm_end) {
+		sa_user_error("rsp %llx is not in the original stack\n", rsp);
 		err = -EINVAL;
 		goto err_unlock;
 	}
@@ -115,8 +123,8 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta)
 	}
 
 	spin_unlock(&mm->arg_lock);
-	// disattivato per ora, lo stack non si può spostare completamente
-	// vm_munmap(old_start, old_len);
+	*out_old_start = old_start;
+	*out_old_len = old_len;
 	*sa_delta = shdwstck_delta;
 	sa_debug(SA_DEBUG_PIVOT,
 		 "pivot: [%lx-%lx) -> [%lx-%lx), delta %ld, shadow %llx\n",

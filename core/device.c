@@ -23,23 +23,46 @@ struct shdwstck_device {
 
 static struct shdwstck_device device;
 
-static long shdwstck_ioctl(struct file *file, unsigned int cmd,
-			   unsigned long arg)
+static long shdwstck_get_offset(__u64 __user *uarg)
 {
-	void __user *user_arg = (void __user *)arg;
+	u64 offset;
+	int err;
+
+	err = sa_get_offset(&offset);
+	if (err)
+		return err;
+
+	return put_user(offset, uarg);
+}
+
+static long shdwstck_pivot(struct ioctl_pivot_params __user *uarg)
+{
 	struct ioctl_pivot_params req;
 
-	if (cmd != IOCTL_SHADOW_PIVOT)
-		return -ENOTTY;
-
-	if (copy_from_user(&req, user_arg, sizeof(req)))
+	if (copy_from_user(&req, uarg, sizeof(req)))
 		return -EFAULT;
 
-	req.error = sa_pivot(req.rsp, req.new_stack_address, &req.delta);
-	if (copy_to_user(user_arg, &req, sizeof(req)))
+	req.error = sa_pivot(req.rsp, req.new_stack_address, &req.delta,
+			     &req.old_start, &req.old_len);
+	if (copy_to_user(uarg, &req, sizeof(req)))
 		return -EFAULT;
 
 	return 0;
+}
+
+static long shdwstck_ioctl(struct file *file, unsigned int cmd,
+			   unsigned long arg)
+{
+	void __user *uarg = (void __user *)arg;
+
+	switch (cmd) {
+	case IOCTL_SHADOW_PIVOT:
+		return shdwstck_pivot(uarg);
+	case IOCTL_SHADOW_GET_OFFSET:
+		return shdwstck_get_offset(uarg);
+	default:
+		return -ENOTTY;
+	}
 }
 
 static const struct file_operations ops = {
