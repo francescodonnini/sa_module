@@ -213,12 +213,13 @@ struct page *sa_lookup_shadow_page(struct mm_struct *mm, unsigned long shadow)
 }
 
 long sa_copy_shadow_locked(struct mm_struct *parent_mm, struct mm_struct *mm,
-			   u64 stack_base, u64 sp)
+			   u64 stack_base, u64 stack_end, u64 sp)
 {
 	u64 shadow = shdwstck_addr(stack_base);
-	unsigned long nr = shdwstck_size >> PAGE_SHIFT;
+	unsigned long nr = (stack_end - stack_base) >> PAGE_SHIFT;
 	unsigned long first = (sp - stack_base) >> PAGE_SHIFT;
-	int i, copied = 0;
+	unsigned long i;
+	int copied = 0;
 	long err = 0;
 
 	mmap_assert_locked(parent_mm);

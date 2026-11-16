@@ -108,7 +108,8 @@ static void sa_stack_open(struct vm_area_struct *vma)
 		return;
 	}
 
-	err = sa_copy_shadow_locked(current->mm, child, vma->vm_start, sp);
+	err = sa_copy_shadow_locked(current->mm, child, vma->vm_start,
+				    vma->vm_end, sp);
 	if (err) {
 		/* open cannot fail the fork: the child dies at its first fault */
 		WRITE_ONCE(alloc->broken, true);
@@ -117,6 +118,7 @@ static void sa_stack_open(struct vm_area_struct *vma)
 	}
 
 	alloc->main_stack = vma->vm_start;
+	alloc->main_size = vma->vm_end - vma->vm_start;
 }
 
 /*
@@ -150,10 +152,17 @@ static void sa_stack_close(struct vm_area_struct *vma)
 	alloc_teardown_locked(alloc);
 }
 
+/* Uno stack non si sposta: la shadow è legata al suo indirizzo. */
+static int sa_stack_mremap(struct vm_area_struct *vma)
+{
+	return -EINVAL;
+}
+
 static const struct vm_operations_struct sa_stack_vm_ops = {
 	.access = sa_stack_access,
 	.close = sa_stack_close,
 	.fault = sa_stack_fault,
+	.mremap = sa_stack_mremap,
 	.open = sa_stack_open,
 };
 

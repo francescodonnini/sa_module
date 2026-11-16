@@ -24,13 +24,12 @@
  *
  * Returns 0 on success, <0 otherwise
  */
-long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta, u64 *out_old_start,
-	      u64 *out_old_len)
+long sa_pivot(struct ioctl_pivot *pivot)
 {
 	struct mm_struct *mm;
 	struct sa_allocator_desc *alloc;
 	struct vm_area_struct *old_area, *new_area;
-	unsigned long old_start, new_start, sp, addr;
+	unsigned long old_start, new_start, new_end, sp, addr;
 	size_t old_len;
 	long delta, err, n;
 	int i;
@@ -50,46 +49,34 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta, u64 *out_old_start,
 		goto err_unlock_nofree;
 	}
 
-	old_area = find_vma(mm, rsp);
-	if (!old_area || old_area->vm_start > rsp) {
-		sa_user_error("no_vma for rsp %llx\n", rsp);
+	old_area = find_vma(mm, pivot->rsp);
+	if (!old_area || old_area->vm_start > pivot->rsp) {
+		sa_user_error("no_vma for rsp %llx\n", pivot->rsp);
 		err = -EINVAL;
 		goto err_unlock;
 	}
 
-	new_area = find_vma(mm, new_stack_address);
-	if (!new_area || new_area->vm_start > new_stack_address ||
+	new_area = find_vma(mm, pivot->new_stack_address);
+	if (!new_area || new_area->vm_start > pivot->new_stack_address ||
 	    !sa_is_stack_vma(new_area)) {
 		sa_user_error("no vma for new stack %llx or invalid mapping\n",
-			      new_stack_address);
+			      pivot->new_stack_address);
 		err = -EINVAL;
 		goto err_unlock;
 	}
 
 	new_start = new_area->vm_start;
-	if (!valid_stack_base(new_start) ||
-	    new_area->vm_end - new_area->vm_start != shdwstck_size) {
+	new_end = new_area->vm_end;
+	if (!sa_stack_range_ok(new_start, new_end)) {
 		sa_user_error("bad new stack vma [%lx-%lx]\n",
 			      new_area->vm_start, new_area->vm_end);
 		err = -EINVAL;
 		goto err_unlock;
 	}
 
-	sp = new_stack_address;
-	if (sp < new_start || sp >= new_start + shdwstck_size) {
-		err = -EINVAL;
-		goto err_unlock;
-	}
-
-	if (mm->start_stack < old_area->vm_start ||
-	    mm->start_stack >= old_area->vm_end) {
-		sa_user_error("rsp %llx is not in the original stack\n", rsp);
-		err = -EINVAL;
-		goto err_unlock;
-	}
-
+	sp = pivot->new_stack_address;
 	n = 0;
-	for (addr = ALIGN_DOWN(sp, PAGE_SIZE); addr < new_start + shdwstck_size;
+	for (addr = ALIGN_DOWN(sp, PAGE_SIZE); addr < new_end;
 	     addr += PAGE_SIZE) {
 		err = sa_install_shadow_page(mm, shdwstck_addr(addr), NULL);
 		if (err < 0)
@@ -105,9 +92,9 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta, u64 *out_old_start,
 	old_len = old_area->vm_end - old_area->vm_start;
 	mmap_write_unlock(mm);
 	alloc->main_stack = new_start;
-	delta = new_stack_address - rsp;
+	delta = pivot->new_stack_address - pivot->rsp;
 	spin_lock(&mm->arg_lock);
-	mm->start_stack = new_start;
+	mm->start_stack = pivot->new_stack_address;
 	mm->arg_start += delta;
 	mm->arg_end += delta;
 	mm->env_start += delta;
@@ -123,14 +110,14 @@ long sa_pivot(u64 rsp, u64 new_stack_address, u64 *sa_delta, u64 *out_old_start,
 	}
 
 	spin_unlock(&mm->arg_lock);
-	*out_old_start = old_start;
-	*out_old_len = old_len;
-	*sa_delta = shdwstck_delta;
+	pivot->old_start = old_start;
+	pivot->old_len = old_len;
+	pivot->delta = shdwstck_delta;
+	alloc->main_size = new_end - new_start;
 	sa_debug(SA_DEBUG_PIVOT,
 		 "pivot: [%lx-%lx) -> [%lx-%lx), delta %ld, shadow %llx\n",
-		 old_start, old_start + old_len, new_start,
-		 new_start + shdwstck_size, delta,
-		 shdwstck_addr(new_stack_address));
+		 old_start, old_start + old_len, new_start, new_end, delta,
+		 shdwstck_addr(pivot->new_stack_address));
 	return 0;
 
 err_unlock:

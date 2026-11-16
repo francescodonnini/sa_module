@@ -9,6 +9,7 @@
 struct sa_allocator_desc {
 	struct mm_struct *mm;
 	u64 main_stack;
+	u64 main_size;
 	/* the shadow of the child could not be copied: its stack faults SIGSEGV */
 	bool broken;
 };

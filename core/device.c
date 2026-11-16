@@ -35,15 +35,33 @@ static long shdwstck_get_offset(__u64 __user *uarg)
 	return put_user(offset, uarg);
 }
 
-static long shdwstck_pivot(struct ioctl_pivot_params __user *uarg)
+static long shdwstck_layout(struct ioctl_layout __user *uarg)
 {
-	struct ioctl_pivot_params req;
+	struct ioctl_layout req;
+	long err;
+
+	err = sa_layout(&req);
+	if (err)
+		return err;
+
+	if (copy_to_user(uarg, &req, sizeof(req)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static long shdwstck_pivot(struct ioctl_pivot __user *uarg)
+{
+	struct ioctl_pivot req;
+	long err;
 
 	if (copy_from_user(&req, uarg, sizeof(req)))
 		return -EFAULT;
 
-	req.error = sa_pivot(req.rsp, req.new_stack_address, &req.delta,
-			     &req.old_start, &req.old_len);
+	err = sa_pivot(&req);
+	if (err)
+		return err;
+
 	if (copy_to_user(uarg, &req, sizeof(req)))
 		return -EFAULT;
 
@@ -56,10 +74,12 @@ static long shdwstck_ioctl(struct file *file, unsigned int cmd,
 	void __user *uarg = (void __user *)arg;
 
 	switch (cmd) {
-	case IOCTL_SHADOW_PIVOT:
-		return shdwstck_pivot(uarg);
 	case IOCTL_SHADOW_GET_OFFSET:
 		return shdwstck_get_offset(uarg);
+	case IOCTL_SHADOW_GET_LAYOUT:
+		return shdwstck_layout(uarg);
+	case IOCTL_SHADOW_PIVOT:
+		return shdwstck_pivot(uarg);
 	default:
 		return -ENOTTY;
 	}
@@ -67,6 +87,7 @@ static long shdwstck_ioctl(struct file *file, unsigned int cmd,
 
 static const struct file_operations ops = {
 	.owner = THIS_MODULE,
+	.get_unmapped_area = sa_get_unmapped_area,
 	.unlocked_ioctl = shdwstck_ioctl,
 #if SA_HAVE_MMAP_PREPARE
 	.mmap_prepare = sa_mmap_prepare,

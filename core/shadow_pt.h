@@ -22,7 +22,7 @@ int sa_install_shadow_page(struct mm_struct *mm, unsigned long shadow,
 struct page *sa_lookup_shadow_page(struct mm_struct *mm, unsigned long shadow);
 
 long sa_copy_shadow_locked(struct mm_struct *parent_mm, struct mm_struct *mm,
-			   u64 stack_base, u64 sp);
+			   u64 stack_base, u64 stack_end, u64 sp);
 
 void sa_unmap_range(struct sa_gather *g, unsigned long start,
 		    unsigned long end);
